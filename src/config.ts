@@ -6,6 +6,8 @@ export interface Config {
   authDir: string;
   /** מספר טלפון לצימוד בקוד (ספרות בלבד, פורמט בינלאומי). ריק = צימוד ב-QR. */
   pairingPhone: string | undefined;
+  /** תיקיית הנתונים: קבצי מצב עכשיו, ובהמשך גם קובץ ה-SQLite. */
+  dataDir: string;
   logLevel: string;
   baileysLogLevel: string;
 }
@@ -33,6 +35,7 @@ export function parseConfig(env: NodeJS.ProcessEnv, cwd: string = process.cwd())
   return {
     authDir: path.resolve(cwd, (env.AUTH_DIR ?? '').trim() || 'auth'),
     pairingPhone: pairingRaw || undefined,
+    dataDir: path.resolve(cwd, (env.DATA_DIR ?? '').trim() || 'data'),
     logLevel: readLogLevel(env, 'LOG_LEVEL', 'info'),
     baileysLogLevel: readLogLevel(env, 'BAILEYS_LOG_LEVEL', 'silent'),
   };

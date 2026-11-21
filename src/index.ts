@@ -1,6 +1,13 @@
 import { ConfigError, loadConfig } from './config.js';
 import { createBaileysLogger, createLogger } from './logger.js';
-import { WhatsAppClient } from './whatsapp.js';
+import { StatusFiles } from './statusfiles.js';
+import { WhatsAppClient, type FatalReason } from './whatsapp.js';
+
+const FATAL_TEXT: Record<FatalReason, string> = {
+  logged_out: 'המכשיר נותק מהחשבון. יש למחוק את תיקיית auth, להפעיל מחדש ולצמד שוב.',
+  replaced: 'תהליך אחר משתמש באותה תיקיית auth. יש לוודא שרץ רק תהליך אחד.',
+  forbidden: 'וואטסאפ דחה את החיבור (403). ייתכן שהחשבון נחסם.',
+};
 
 // כל קובץ שהתהליך יוצר (auth/, data/) נגיש למשתמש המריץ בלבד
 process.umask(0o077);
@@ -18,6 +25,8 @@ async function main(): Promise<void> {
   }
 
   const logger = createLogger(config.logLevel);
+  const files = new StatusFiles(config.dataDir);
+  files.status('מתחבר לוואטסאפ...');
   let groupsPrinted = false;
 
   const whatsapp = new WhatsAppClient({
@@ -25,21 +34,30 @@ async function main(): Promise<void> {
     pairingPhone: config.pairingPhone,
     logger,
     baileysLogger: createBaileysLogger(config.baileysLogLevel),
+    onQr: (qr) => files.pairingQr(qr),
+    onPairingCode: (code) => files.pairingCode(code),
+    onReconnecting: (statusCode) => files.status(`החיבור נסגר (קוד ${statusCode ?? 'לא ידוע'}), מנסה להתחבר מחדש...`),
     onOpen: async () => {
+      files.clearPairing();
+      files.status('מחובר לוואטסאפ.');
       if (groupsPrinted) return;
       const groups = await whatsapp.listGroups();
       groupsPrinted = true;
+      files.groups(groups);
+      files.status(`מחובר לוואטסאפ. ${groups.length} קבוצות, הרשימה ב-data/groups.txt.`);
       // פלט למסוף לצורך הגדרה, לא ללוג: שמות ומזהי קבוצות בלבד
       const lines = groups.map((g, i) => `${String(i + 1).padStart(3)}. ${g.name}\n     ${g.jid}`);
       process.stdout.write(`\nקבוצות (${groups.length}):\n${lines.join('\n')}\n\n`);
     },
-    onFatal: () => {
+    onFatal: (reason) => {
+      files.status('נעצר: ' + FATAL_TEXT[reason]);
       process.exitCode = 1;
     },
   });
 
   const shutdown = (signal: string) => {
     logger.info({ signal }, 'כיבוי מסודר');
+    files.status('השירות כובה.');
     whatsapp.stop();
   };
   process.once('SIGINT', () => shutdown('SIGINT'));

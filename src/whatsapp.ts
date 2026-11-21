@@ -20,6 +20,12 @@ export interface WhatsAppOptions {
   pairingPhone: string | undefined;
   logger: Logger;
   baileysLogger: Logger;
+  /** קוד QR חדש לסריקה (מתחלף כל כמה עשרות שניות). */
+  onQr?: (qr: string) => void | Promise<void>;
+  /** קוד צימוד להקלדה בטלפון. */
+  onPairingCode?: (code: string) => void | Promise<void>;
+  /** החיבור נסגר ומתבצע ניסיון חוזר. */
+  onReconnecting?: (statusCode: number | undefined) => void;
   /** נקרא בכל פעם שהחיבור נפתח (גם אחרי התחברות מחדש). */
   onOpen?: () => void | Promise<void>;
   /** נקרא כשהחיבור נסגר סופית ואין טעם לנסות שוב בלי התערבות ידנית. */
@@ -110,6 +116,7 @@ export class WhatsAppClient {
           process.stdout.write(
             '\nסרוק את הקוד בטלפון: וואטסאפ > הגדרות > מכשירים מקושרים > קישור מכשיר\n\n' + art + '\n',
           );
+          await this.opts.onQr?.(qr);
         }
 
         if (usePairingCode && !pairingRequested && (connection === 'connecting' || qr)) {
@@ -120,6 +127,7 @@ export class WhatsAppClient {
               '\nקוד צימוד: ' + code + '\n' +
               'בטלפון: וואטסאפ > הגדרות > מכשירים מקושרים > קישור מכשיר > קישור באמצעות מספר טלפון\n\n',
             );
+            await this.opts.onPairingCode?.(code);
           } catch (err) {
             pairingRequested = false;
             logger.error({ err: errorName(err) }, 'בקשת קוד הצימוד נכשלה');
@@ -172,6 +180,7 @@ export class WhatsAppClient {
     const delay = immediate ? 0 : Math.min(RECONNECT_MIN_MS * 2 ** this.reconnectAttempt, RECONNECT_MAX_MS);
     if (!immediate) this.reconnectAttempt++;
     logger.warn({ statusCode, delayMs: delay, attempt: this.reconnectAttempt }, 'החיבור נסגר, מתחבר מחדש');
+    if (!immediate) this.opts.onReconnecting?.(statusCode);
 
     if (delay > 0) {
       await sleep(delay, undefined, { signal: this.stopSignal.signal }).catch(() => undefined);
