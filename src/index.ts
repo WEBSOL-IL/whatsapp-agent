@@ -1,6 +1,13 @@
 import path from 'node:path';
 import { FileAllowlist } from './allowlist.js';
-import { ConfigError, loadConfig, TRANSCRIBE_MAX_ATTEMPTS, TRANSCRIBE_TIMEOUT_MS, type Config } from './config.js';
+import {
+  ConfigError,
+  loadConfig,
+  resolveStateDir,
+  TRANSCRIBE_MAX_ATTEMPTS,
+  TRANSCRIBE_TIMEOUT_MS,
+  type Config,
+} from './config.js';
 import { createDelivery } from './delivery.js';
 import { createBaileysLogger, createLogger } from './logger.js';
 import { createPipeline, formatTime, MemoryProcessedStore } from './pipeline.js';
@@ -39,8 +46,11 @@ function loadConfigOrIdle(): Config | undefined {
   } catch (err) {
     if (!(err instanceof ConfigError)) throw err;
     console.error('שגיאת הגדרות: ' + err.message);
-    const dataDir = path.resolve(process.cwd(), (process.env.DATA_DIR ?? '').trim() || 'data');
-    new StatusFiles(dataDir).status('שגיאת הגדרות, השירות לא פועל:\n' + err.message + '\nתקן את קובץ .env והפעל מחדש.');
+    const stateDir = resolveStateDir(process.env);
+    const dataDir = path.resolve(stateDir, (process.env.DATA_DIR ?? '').trim() || 'data');
+    new StatusFiles(dataDir).status(
+      'שגיאת הגדרות, השירות לא פועל:\n' + err.message + `\nתקן את הקובץ ${path.join(stateDir, '.env')} והפעל מחדש.`,
+    );
     idleUntilSignal();
     return undefined;
   }

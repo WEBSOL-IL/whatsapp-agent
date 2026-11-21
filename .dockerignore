@@ -5,4 +5,5 @@ data
 .env
 .env.*
 groups.json
+DATA-LOCATION.txt
 .git

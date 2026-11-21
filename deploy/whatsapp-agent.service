@@ -17,6 +17,7 @@ RestartSec=10
 RestartPreventExitStatus=2
 Environment=NODE_ENV=production
 UMask=0077
+# הסשן, ההגדרות והנתונים נשמרים ב-~/whatsapp-agent-data של המשתמש המריץ
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full

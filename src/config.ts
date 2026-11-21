@@ -1,8 +1,11 @@
-import { existsSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import type { TranscriberConfig } from './transcriber/index.js';
 
 export interface Config {
+  /** התיקייה הקבועה של השירות: הגדרות, סשן ונתונים. נמצאת מחוץ לתיקיית הקוד. */
+  stateDir: string;
   /** תיקיית פרטי ההתחברות לוואטסאפ. שווה לגישה מלאה לחשבון. */
   authDir: string;
   /** מספר טלפון לצימוד בקוד (ספרות בלבד, פורמט בינלאומי). ריק = צימוד ב-QR. */
@@ -94,14 +97,14 @@ function readTranscriber(env: NodeJS.ProcessEnv): TranscriberConfig {
 }
 
 /** פונקציה טהורה: מקבלת את משתני הסביבה ומחזירה הגדרות מאומתות, או זורקת ConfigError. */
-export function parseConfig(env: NodeJS.ProcessEnv, cwd: string = process.cwd()): Config {
+export function parseConfig(env: NodeJS.ProcessEnv, stateDir: string = resolveStateDir(env)): Config {
   const pairingRaw = (env.PAIRING_PHONE ?? '').trim();
   if (pairingRaw && !/^[1-9]\d{7,14}$/.test(pairingRaw)) {
     // בכוונה לא מדפיסים את הערך עצמו
     throw new ConfigError('PAIRING_PHONE חייב להיות ספרות בלבד בפורמט בינלאומי, בלי + ובלי רווחים (למשל 9725XXXXXXXX)');
   }
 
-  const dataDir = path.resolve(cwd, (env.DATA_DIR ?? '').trim() || 'data');
+  const dataDir = path.resolve(stateDir, (env.DATA_DIR ?? '').trim() || 'data');
   const languageHint = (env.TRANSCRIBE_LANGUAGE ?? '').trim().toLowerCase();
   if (languageHint && !/^[a-z]{2,3}$/.test(languageHint)) {
     throw new ConfigError('TRANSCRIBE_LANGUAGE חייב להיות קוד שפה קצר (למשל he), או ריק לזיהוי אוטומטי');
@@ -114,7 +117,8 @@ export function parseConfig(env: NodeJS.ProcessEnv, cwd: string = process.cwd())
   }
 
   return {
-    authDir: path.resolve(cwd, (env.AUTH_DIR ?? '').trim() || 'auth'),
+    stateDir,
+    authDir: path.resolve(stateDir, (env.AUTH_DIR ?? '').trim() || 'auth'),
     pairingPhone: pairingRaw || undefined,
     dataDir,
     allowlistFile: path.resolve(dataDir, 'allowed-groups.txt'),
@@ -130,11 +134,47 @@ export function parseConfig(env: NodeJS.ProcessEnv, cwd: string = process.cwd())
   };
 }
 
-/** טוען את .env (אם קיים) בלי תלות חיצונית, ומחזיר הגדרות מאומתות. */
-export function loadConfig(): Config {
-  const envFile = path.resolve(process.cwd(), '.env');
-  if (existsSync(envFile)) {
-    process.loadEnvFile(envFile);
+/**
+ * התיקייה הקבועה של השירות. היא בכוונה מחוץ לתיקיית הקוד: בפריסה מ-GitHub
+ * תיקיית הקוד נמחקת ונבנית מחדש בכל deploy, ואיתה היו נמחקים הסשן וההגדרות.
+ * ברירת המחדל היא תיקייה בבית של המשתמש המריץ. אפשר לשנות עם STATE_DIR.
+ */
+export function resolveStateDir(env: NodeJS.ProcessEnv, home: string = os.homedir()): string {
+  const explicit = (env.STATE_DIR ?? '').trim();
+  return explicit ? path.resolve(explicit) : path.join(home, 'whatsapp-agent-data');
+}
+
+/**
+ * מכין את התיקייה הקבועה וטוען ממנה את .env, ואז מחזיר הגדרות מאומתות.
+ * בהפעלה ראשונה נוצר שם קובץ .env מתוך .env שבתיקיית הקוד (אם יש) או מהתבנית.
+ */
+export function loadConfig(projectDir: string = process.cwd()): Config {
+  const stateDir = resolveStateDir(process.env);
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+
+  const stateEnv = path.join(stateDir, '.env');
+  const projectEnv = path.join(projectDir, '.env');
+  if (!existsSync(stateEnv)) {
+    const template = path.join(projectDir, '.env.example');
+    if (existsSync(projectEnv)) copyFileSync(projectEnv, stateEnv);
+    else if (existsSync(template)) copyFileSync(template, stateEnv);
   }
-  return parseConfig(process.env);
+  // הקובץ מכיל את מפתח ה-API: קריאה למשתמש המריץ בלבד
+  if (existsSync(stateEnv)) chmodSync(stateEnv, 0o600);
+  // משתנה שכבר מוגדר לא נדרס, ולכן הסדר קובע עדיפות: סביבה, אז הקובץ הקבוע, אז קובץ מקומי
+  if (existsSync(stateEnv)) process.loadEnvFile(stateEnv);
+  if (existsSync(projectEnv)) process.loadEnvFile(projectEnv);
+
+  // שלט בתיקיית הקוד, למי שמחפש את הקבצים דרך מנהל קבצים
+  try {
+    writeFileSync(
+      path.join(projectDir, 'DATA-LOCATION.txt'),
+      `ההגדרות (.env), הסשן וקבצי המצב של השירות נמצאים בתיקייה:\n${stateDir}\n\n` +
+        'התיקייה הזאת נשארת גם אחרי deploy. תיקיית הקוד נמחקת בכל deploy, ולכן לא שומרים בה דבר.\n',
+    );
+  } catch {
+    // תיקיית קוד לקריאה בלבד (למשל ב-Docker): לא נורא
+  }
+
+  return parseConfig(process.env, stateDir);
 }

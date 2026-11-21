@@ -5,6 +5,7 @@ data/
 .env.*
 !.env.example
 groups.json
+DATA-LOCATION.txt
 
 node_modules/
 dist/

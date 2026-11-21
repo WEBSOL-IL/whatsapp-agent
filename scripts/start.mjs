@@ -4,13 +4,16 @@
 import { execSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 process.chdir(root);
 
-const dataDir = path.resolve(root, process.env.DATA_DIR || 'data');
+// אותה תיקייה קבועה שהשירות עצמו משתמש בה (ראה resolveStateDir ב-src/config.ts)
+const stateDir = process.env.STATE_DIR ? path.resolve(process.env.STATE_DIR) : path.join(os.homedir(), 'whatsapp-agent-data');
+const dataDir = path.resolve(stateDir, process.env.DATA_DIR || 'data');
 
 function writeStatus(text) {
   try {
