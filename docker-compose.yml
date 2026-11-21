@@ -1,0 +1,19 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped   # עולה לבד אחרי קריסה או אתחול של השרת
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - auth:/app/auth        # פרטי ההתחברות לוואטסאפ - שווה לגישה מלאה לחשבון
+      - data:/app/data
+    # בכוונה אין ports: התהליך לא מאזין לשום פורט
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  auth:
+  data:
