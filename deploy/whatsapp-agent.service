@@ -13,8 +13,8 @@ WorkingDirectory=/home/YOUR_USER/whatsapp-agent
 ExecStart=/usr/bin/node dist/index.js
 Restart=always
 RestartSec=10
-# הקוד יוצא עם קוד 1 כשנדרשת התערבות ידנית (ניתוק המכשיר, חסימה). לא מנסים שוב בלולאה.
-RestartPreventExitStatus=1 2
+# שגיאת הגדרות (קוד 2) לא תיפתר בהפעלה מחדש
+RestartPreventExitStatus=2
 Environment=NODE_ENV=production
 UMask=0077
 NoNewPrivileges=true

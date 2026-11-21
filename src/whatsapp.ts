@@ -1,4 +1,4 @@
-import { chmod, mkdir } from 'node:fs/promises';
+import { chmod, mkdir, rm } from 'node:fs/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
 import makeWASocket, {
   Browsers,
@@ -32,10 +32,12 @@ export interface WhatsAppOptions {
   onFatal?: (reason: FatalReason) => void;
 }
 
-export type FatalReason = 'logged_out' | 'replaced' | 'forbidden';
+export type FatalReason = 'logged_out' | 'replaced' | 'forbidden' | 'pairing_timeout';
 
 const RECONNECT_MIN_MS = 2_000;
 const RECONNECT_MAX_MS = 60_000;
+/** כמה חלונות צימוד (כ-2 עד 3 דקות כל אחד) פותחים לפני שעוצרים ומחכים להפעלה ידנית. */
+const MAX_PAIRING_ATTEMPTS = 5;
 
 /**
  * חיבור לוואטסאפ כמכשיר מקושר דרך Baileys.
@@ -46,6 +48,11 @@ export class WhatsAppClient {
   private stopped = false;
   private connected = false;
   private reconnectAttempt = 0;
+  private pairingAttempts = 0;
+  /** האם החיבור הנוכחי התחיל עם סשן מצומד. */
+  private paired = false;
+  /** האם בחיבור הנוכחי הוצע צימוד (התקבל QR), להבדיל מכשל רשת לפני כן. */
+  private pairingOffered = false;
   private readonly stopSignal = new AbortController();
 
   constructor(private readonly opts: WhatsAppOptions) {}
@@ -83,8 +90,17 @@ export class WhatsAppClient {
 
   private async connect(): Promise<void> {
     const { logger, baileysLogger, authDir, pairingPhone } = this.opts;
-    const { state, saveCreds } = await useMultiFileAuthState(authDir);
-    const usePairingCode = Boolean(pairingPhone) && !state.creds.registered;
+    let { state, saveCreds } = await useMultiFileAuthState(authDir);
+    // creds.account נקבע רק כשצימוד הושלם (ב-QR או בקוד). creds.registered לא אמין לצימוד ב-QR.
+    this.paired = Boolean(state.creds.account);
+    if (!this.paired && state.creds.me) {
+      // נשארו שאריות מצימוד בקוד שלא הושלם. איתן Baileys מנסה "להתחבר" במקום לצמד,
+      // ווואטסאפ עונה 401. מתחילים מסשן נקי.
+      logger.warn('נמצא צימוד שלא הושלם, מנקה את תיקיית auth ומתחיל צימוד חדש');
+      await this.clearAuth();
+      ({ state, saveCreds } = await useMultiFileAuthState(authDir));
+    }
+    const usePairingCode = Boolean(pairingPhone) && !this.paired;
 
     const sock = makeWASocket({
       auth: {
@@ -103,6 +119,7 @@ export class WhatsAppClient {
     this.sock = sock;
 
     let pairingRequested = false;
+    this.pairingOffered = false;
 
     sock.ev.on('creds.update', saveCreds);
 
@@ -110,6 +127,8 @@ export class WhatsAppClient {
       void (async () => {
         if (sock !== this.sock) return; // אירוע מאוחר של חיבור ישן
         const { connection, lastDisconnect, qr } = update;
+
+        if (qr) this.pairingOffered = true;
 
         if (qr && !usePairingCode) {
           const art = await QRCode.toString(qr, { type: 'terminal', small: true });
@@ -136,7 +155,9 @@ export class WhatsAppClient {
 
         if (connection === 'open') {
           this.connected = true;
+          this.paired = true;
           this.reconnectAttempt = 0;
+          this.pairingAttempts = 0;
           logger.info('החיבור לוואטסאפ פתוח');
           try {
             await this.opts.onOpen?.();
@@ -159,11 +180,11 @@ export class WhatsAppClient {
   private async handleClose(statusCode: number | undefined): Promise<void> {
     const { logger } = this.opts;
 
-    if (statusCode === DisconnectReason.loggedOut) {
-      logger.error(
-        { statusCode },
-        'המכשיר נותק מהחשבון (logged out). יש למחוק את תיקיית auth ולצמד מחדש, ראה README',
-      );
+    if (statusCode === DisconnectReason.loggedOut && this.paired) {
+      // הסשן בוטל (למשל הוסר מ"מכשירים מקושרים" בטלפון) ואין בו עוד שימוש.
+      // מנקים אותו כדי שההפעלה הבאה תתחיל צימוד חדש, ועוצרים עד להפעלה ידנית.
+      logger.error({ statusCode }, 'המכשיר נותק מהחשבון (logged out). הסשן נמחק, נדרש צימוד מחדש');
+      await this.clearAuth();
       return this.fatal('logged_out');
     }
     if (statusCode === DisconnectReason.connectionReplaced) {
@@ -177,6 +198,12 @@ export class WhatsAppClient {
 
     // אחרי סריקת QR וואטסאפ מנתק בכוונה ודורש חיבור מחדש מיידי (restartRequired)
     const immediate = statusCode === DisconnectReason.restartRequired;
+
+    if (!this.paired && !immediate && this.pairingOffered && ++this.pairingAttempts >= MAX_PAIRING_ATTEMPTS) {
+      // לא ממשיכים לבקש קודי צימוד בלי סוף: כל בקשה שולחת התראה לטלפון
+      logger.error({ attempts: this.pairingAttempts }, 'הצימוד לא הושלם בזמן. עוצר עד להפעלה מחדש');
+      return this.fatal('pairing_timeout');
+    }
     const delay = immediate ? 0 : Math.min(RECONNECT_MIN_MS * 2 ** this.reconnectAttempt, RECONNECT_MAX_MS);
     if (!immediate) this.reconnectAttempt++;
     logger.warn({ statusCode, delayMs: delay, attempt: this.reconnectAttempt }, 'החיבור נסגר, מתחבר מחדש');
@@ -192,6 +219,11 @@ export class WhatsAppClient {
       logger.error({ err: errorName(err) }, 'התחברות מחדש נכשלה');
       await this.handleClose(undefined);
     }
+  }
+
+  private async clearAuth(): Promise<void> {
+    await rm(this.opts.authDir, { recursive: true, force: true });
+    await mkdir(this.opts.authDir, { recursive: true, mode: 0o700 });
   }
 
   private fatal(reason: FatalReason): void {

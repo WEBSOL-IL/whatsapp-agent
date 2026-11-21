@@ -4,7 +4,8 @@ import { StatusFiles } from './statusfiles.js';
 import { WhatsAppClient, type FatalReason } from './whatsapp.js';
 
 const FATAL_TEXT: Record<FatalReason, string> = {
-  logged_out: 'המכשיר נותק מהחשבון. יש למחוק את תיקיית auth, להפעיל מחדש ולצמד שוב.',
+  logged_out: 'המכשיר נותק מהחשבון והסשן נמחק. הפעל מחדש את התהליך כדי לצמד שוב.',
+  pairing_timeout: 'הצימוד לא הושלם בזמן. הפעל מחדש את התהליך כדי לקבל קוד חדש.',
   replaced: 'תהליך אחר משתמש באותה תיקיית auth. יש לוודא שרץ רק תהליך אחד.',
   forbidden: 'וואטסאפ דחה את החיבור (403). ייתכן שהחשבון נחסם.',
 };
@@ -28,6 +29,7 @@ async function main(): Promise<void> {
   const files = new StatusFiles(config.dataDir);
   files.status('מתחבר לוואטסאפ...');
   let groupsPrinted = false;
+  let idle: NodeJS.Timeout | undefined;
 
   const whatsapp = new WhatsAppClient({
     authDir: config.authDir,
@@ -50,8 +52,11 @@ async function main(): Promise<void> {
       process.stdout.write(`\nקבוצות (${groups.length}):\n${lines.join('\n')}\n\n`);
     },
     onFatal: (reason) => {
+      files.clearPairing();
       files.status('נעצר: ' + FATAL_TEXT[reason]);
-      process.exitCode = 1;
+      // נשארים במצב המתנה במקום לצאת: יציאה הייתה גורמת למנהל התהליכים להפעיל מחדש
+      // בלולאה, כלומר ניסיונות חיבור חוזרים לוואטסאפ בלי שמישהו מטפל בבעיה.
+      idle = setInterval(() => undefined, 60 * 60 * 1000);
     },
   });
 
@@ -59,6 +64,7 @@ async function main(): Promise<void> {
     logger.info({ signal }, 'כיבוי מסודר');
     files.status('השירות כובה.');
     whatsapp.stop();
+    clearInterval(idle);
   };
   process.once('SIGINT', () => shutdown('SIGINT'));
   process.once('SIGTERM', () => shutdown('SIGTERM'));
