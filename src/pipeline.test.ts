@@ -2,7 +2,15 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { WAMessage } from 'baileys';
 import { pino } from 'pino';
-import { createPipeline, formatPrivate, hasSpeech, MemoryProcessedStore, type Outcome, type TranscriptReady } from './pipeline.js';
+import {
+  createPipeline,
+  formatPrivate,
+  hasSpeech,
+  MemoryProcessedStore,
+  type Outcome,
+  type PipelineDeps,
+  type TranscriptReady,
+} from './pipeline.js';
 import { TranscriptionQueue } from './queue.js';
 
 const NOW_SEC = 1_800_000_000;
@@ -22,7 +30,7 @@ function harness(transcribe: () => Promise<{ text: string; language: string; dur
   const transcripts: TranscriptReady[] = [];
   const outcomes: Outcome[] = [];
   const queue = new TranscriptionQueue({ concurrency: 2, timeoutMs: 1000, maxAttempts: 2 });
-  const handle = createPipeline({
+  const deps: PipelineDeps = {
     logger: pino({ level: 'silent' }),
     queue,
     transcriber: { transcribe },
@@ -39,8 +47,8 @@ function harness(transcribe: () => Promise<{ text: string; language: string; dur
     onTranscript: (t) => void transcripts.push(t),
     onOutcome: (o) => void outcomes.push(o),
     now: () => NOW_SEC * 1000,
-  });
-  return { handle, queue, downloads, transcripts, outcomes };
+  };
+  return { handle: createPipeline(deps), deps, queue, downloads, transcripts, outcomes };
 }
 
 const ok = async () => ({ text: 'שלום עולם', language: 'he', durationSec: 5 });
@@ -113,6 +121,29 @@ describe('pipeline', () => {
     assert.equal(calls, 2);
     assert.deepEqual(h.downloads, ['MSG1', 'MSG1']);
     assert.deepEqual(h.outcomes.map((o) => (o.status === 'failed' ? o.error : o.status)), ['TranscriptionApiError(500)']);
+  });
+
+  it('כישלון בשליחה לא גורם לתמלול חוזר ולא לשליחה כפולה', async () => {
+    let transcribeCalls = 0;
+    let sendCalls = 0;
+    const h = harness(async () => {
+      transcribeCalls++;
+      return { text: 'שלום', language: 'he', durationSec: 1 };
+    });
+    const handle = createPipeline({
+      ...h.deps,
+      onTranscript: () => {
+        sendCalls++;
+        throw new Error('send failed');
+      },
+    });
+    handle(voiceMessage(), 'notify');
+    handle(voiceMessage(), 'notify');
+    await settle(h.queue);
+    assert.equal(transcribeCalls, 1);
+    assert.equal(sendCalls, 1);
+    // ההודעה הכפולה נרשמת כדילוג, והראשונה ככישלון שליחה
+    assert.deepEqual(h.outcomes.map((o) => o.status), ['skipped', 'send_failed']);
   });
 });
 

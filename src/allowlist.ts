@@ -2,19 +2,35 @@ import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { isGroupJid } from './filter.js';
 
 const TEMPLATE = `# קבוצות מאושרות לתמלול (שלבים 2-3. בשלב 4 הרשימה תנוהל בפקודות וואטסאפ).
-# שורה לכל קבוצה: המזהה שלה מתוך data/groups.txt, למשל:
+# שורה לכל קבוצה: המזהה שלה מתוך data/groups.txt, ואחריו (לא חובה) יעד התמלול:
+#   פרטי  = התמלול נשלח רק לצ'אט שלך עם עצמך (ברירת המחדל)
+#   קבוצה = התמלול נשלח כתגובה להודעה הקולית, וכל חברי הקבוצה רואים אותו
+# דוגמאות:
 # 120363012345678901@g.us
+# 120363012345678902@g.us קבוצה
 # שורות שמתחילות ב-# הן הערות. שינוי בקובץ נכנס לתוקף מיד, בלי הפעלה מחדש.
 `;
 
-/** פונקציה טהורה: מפענחת את תוכן הקובץ לרשימת מזהי קבוצות תקינים. */
-export function parseAllowlist(text: string): { groups: Set<string>; invalidLines: number } {
-  const groups = new Set<string>();
+/** לאן נשלח התמלול של קבוצה. */
+export type DeliveryMode = 'private' | 'group';
+
+const MODE_WORDS: Record<string, DeliveryMode> = {
+  פרטי: 'private',
+  private: 'private',
+  קבוצה: 'group',
+  group: 'group',
+};
+
+/** פונקציה טהורה: מפענחת את תוכן הקובץ למזהי קבוצות תקינים ויעד התמלול של כל אחת. */
+export function parseAllowlist(text: string): { groups: Map<string, DeliveryMode>; invalidLines: number } {
+  const groups = new Map<string, DeliveryMode>();
   let invalidLines = 0;
   for (const raw of text.split(/\r?\n/)) {
-    const line = raw.replace(/#.*$/, '').trim();
-    if (!line) continue;
-    if (isGroupJid(line) && !/\s/.test(line)) groups.add(line);
+    const parts = raw.replace(/#.*$/, '').trim().split(/\s+/).filter(Boolean);
+    if (parts.length === 0) continue;
+    const [jid, modeWord] = parts as [string, string | undefined];
+    const mode = modeWord === undefined ? 'private' : MODE_WORDS[modeWord.toLowerCase()];
+    if (parts.length <= 2 && isGroupJid(jid) && mode) groups.set(jid, mode);
     else invalidLines++;
   }
   return { groups, invalidLines };
@@ -25,7 +41,7 @@ export function parseAllowlist(text: string): { groups: Set<string>; invalidLine
  * כך שאפשר לערוך אותו ממנהל הקבצים בלי להפעיל מחדש את השירות.
  */
 export class FileAllowlist {
-  private groups = new Set<string>();
+  private groups = new Map<string, DeliveryMode>();
   private loadedMtimeMs = -1;
 
   constructor(
@@ -44,6 +60,12 @@ export class FileAllowlist {
   has(groupJid: string): boolean {
     this.refresh();
     return this.groups.has(groupJid);
+  }
+
+  /** יעד התמלול של קבוצה. קבוצה שאינה ברשימה מקבלת את ברירת המחדל הבטוחה: פרטי. */
+  modeOf(groupJid: string): DeliveryMode {
+    this.refresh();
+    return this.groups.get(groupJid) ?? 'private';
   }
 
   private refresh(): void {

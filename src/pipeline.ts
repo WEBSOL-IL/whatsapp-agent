@@ -26,7 +26,7 @@ export interface PipelineDeps {
   processed: { has(key: string): boolean; add(key: string): void };
   downloadAudio: (msg: WAMessage) => Promise<Buffer>;
   groupName: (groupJid: string) => string;
-  /** מה עושים עם תמלול מוכן. בשלב 2: הדפסה בלבד. */
+  /** מה עושים עם תמלול מוכן: שליחה ליעד, או הדפסה במצב ניסוי. */
   onTranscript: (result: TranscriptReady) => void | Promise<void>;
   /** אירוע מטא-דאטה בלבד (בלי תוכן), ליומן ולסטטוס. */
   onOutcome?: (outcome: Outcome) => void;
@@ -36,7 +36,8 @@ export interface PipelineDeps {
 export type Outcome =
   | { status: 'transcribed'; facts: MessageFacts; elapsedMs: number }
   | { status: 'empty'; facts: MessageFacts }
-  | { status: 'failed'; facts: MessageFacts; error: string }
+  | { status: 'failed'; facts: MessageFacts; error: string; groupName: string; senderName: string }
+  | { status: 'send_failed'; facts: MessageFacts; error: string }
   | { status: 'skipped'; facts: MessageFacts; reason: SkipReason };
 
 /** סיבות דילוג ששווה לרשום ביומן. השאר הן רעש: רוב ההודעות אינן קוליות בקבוצה מאושרת. */
@@ -93,22 +94,47 @@ export function createPipeline(deps: PipelineDeps): (msg: WAMessage, upsertType:
         }
         const elapsedMs = now() - startedAt;
         deps.logger.info({ ...meta, status: 'transcribed', language: result.language, elapsedMs }, 'הודעה תומללה');
-        await deps.onTranscript({
-          facts,
-          message: msg,
-          groupName: deps.groupName(facts.chatJid),
-          senderName: facts.fromMe ? 'אני' : msg.pushName?.trim() || 'לא ידוע',
-          text: result.text,
-          language: result.language,
-        });
+        try {
+          await deps.onTranscript({
+            facts,
+            message: msg,
+            groupName: deps.groupName(facts.chatJid),
+            senderName: senderNameOf(msg, facts),
+            text: result.text,
+            language: result.language,
+          });
+        } catch (err) {
+          // התמלול הצליח אבל השליחה נכשלה. לא מנסים שוב, כדי לא לשלוח פעמיים.
+          const error = describeError(err);
+          deps.logger.error({ ...meta, status: 'send_failed', error }, 'שליחת התמלול נכשלה');
+          deps.onOutcome?.({ status: 'send_failed', facts, error });
+          return;
+        }
         deps.onOutcome?.({ status: 'transcribed', facts, elapsedMs });
       })
       .catch((err: unknown) => {
         const error = describeError(err);
         deps.logger.error({ ...meta, status: 'failed', error }, 'התמלול נכשל');
-        deps.onOutcome?.({ status: 'failed', facts, error });
+        deps.onOutcome?.({
+          status: 'failed',
+          facts,
+          error,
+          groupName: deps.groupName(facts.chatJid),
+          senderName: senderNameOf(msg, facts),
+        });
       });
   };
+}
+
+function senderNameOf(msg: WAMessage, facts: MessageFacts): string {
+  return facts.fromMe ? 'אני' : msg.pushName?.trim() || 'לא ידוע';
+}
+
+/** שעת ההודעה לתצוגה, באזור הזמן שהוגדר. */
+export function formatTime(timestampSec: number, timeZone: string): string {
+  return new Intl.DateTimeFormat('he-IL', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone }).format(
+    new Date(timestampSec * 1000),
+  );
 }
 
 /** תמלול ריק או של סימני פיסוק בלבד נחשב רעש ולא נשלח. */
@@ -126,10 +152,7 @@ function describeError(err: unknown): string {
 
 /** פורמט ההודעה במצב פרטי: [שם הקבוצה] שם השולח, 19:52 ובשורה הבאה התמלול. */
 export function formatPrivate(t: TranscriptReady, timeZone: string): string {
-  const time = new Intl.DateTimeFormat('he-IL', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone }).format(
-    new Date(t.facts.timestampSec * 1000),
-  );
-  return `[${t.groupName}] ${t.senderName}, ${time}\n${t.text}`;
+  return `[${t.groupName}] ${t.senderName}, ${formatTime(t.facts.timestampSec, timeZone)}\n${t.text}`;
 }
 
 /** מזהי הודעות שטופלו, בזיכרון. בשלב 4 יוחלף בטבלה ב-SQLite. */

@@ -4,8 +4,10 @@ import makeWASocket, {
   Browsers,
   DisconnectReason,
   downloadMediaMessage,
+  jidNormalizedUser,
   makeCacheableSignalKeyStore,
   useMultiFileAuthState,
+  type GroupMetadata,
   type WAMessage,
   type WASocket,
 } from 'baileys';
@@ -59,6 +61,11 @@ export class WhatsAppClient {
   private pairingOffered = false;
   private readonly stopSignal = new AbortController();
   private readonly groupNames = new Map<string, string>();
+  /**
+   * מטא-דאטה של קבוצות לשליחה. בלי המטמון הזה Baileys שואלת את השרת על רשימת
+   * המשתתפים בכל שליחה לקבוצה, מה שלפי התיעוד מוביל להגבלת קצב ואף לחסימה.
+   */
+  private readonly groupMeta = new Map<string, GroupMetadata>();
 
   constructor(private readonly opts: WhatsAppOptions) {}
 
@@ -88,6 +95,8 @@ export class WhatsAppClient {
       throw new Error('אין חיבור פעיל לוואטסאפ');
     }
     const groups = await this.sock.groupFetchAllParticipating();
+    this.groupMeta.clear();
+    for (const g of Object.values(groups)) this.groupMeta.set(g.id, g);
     const list = Object.values(groups)
       .map((g) => ({ jid: g.id, name: g.subject || '(ללא שם)' }))
       .sort((a, b) => a.name.localeCompare(b.name, 'he'));
@@ -98,6 +107,27 @@ export class WhatsAppClient {
   /** שם הקבוצה לתצוגה, מהמטמון. שם יכול להשתנות, ולכן הזיהוי תמיד לפי המזהה. */
   groupName(jid: string): string {
     return this.groupNames.get(jid) ?? '(קבוצה לא מוכרת)';
+  }
+
+  /** שולח הודעת טקסט לצ'אט של החשבון עם עצמו. אף אחד אחר לא רואה אותה. */
+  async sendToSelf(text: string): Promise<void> {
+    const sock = this.requireSocket();
+    await sock.sendMessage(selfJid(sock), { text });
+  }
+
+  /** שולח תגובה מצוטטת להודעה, באותה קבוצה. כל חברי הקבוצה רואים אותה. */
+  async replyInGroup(original: WAMessage, text: string): Promise<void> {
+    const sock = this.requireSocket();
+    const groupJid = original.key.remoteJid;
+    if (!groupJid || !groupJid.endsWith('@g.us')) throw new Error('תגובה בקבוצה דורשת הודעת קבוצה');
+    // בקבוצה עם הודעות נעלמות גם התגובה צריכה להיעלם באותו פרק זמן
+    const ephemeralExpiration = this.groupMeta.get(groupJid)?.ephemeralDuration || undefined;
+    await sock.sendMessage(groupJid, { text }, { quoted: original, ephemeralExpiration });
+  }
+
+  private requireSocket(): WASocket {
+    if (!this.sock || !this.connected) throw new Error('אין חיבור פעיל לוואטסאפ');
+    return this.sock;
   }
 
   /** מוריד את האודיו של הודעה לזיכרון בלבד. שום דבר לא נכתב לדיסק. */
@@ -139,6 +169,7 @@ export class WhatsAppClient {
       syncFullHistory: false,
       // לא שומרים תוכן הודעות, ולכן אין מה להחזיר לבקשות שליחה חוזרת
       getMessage: async () => undefined,
+      cachedGroupMetadata: async (jid) => this.groupMeta.get(jid),
     });
     this.sock = sock;
 
@@ -157,7 +188,15 @@ export class WhatsAppClient {
       for (const g of groups) if (g.id && g.subject) this.groupNames.set(g.id, g.subject);
     });
     sock.ev.on('groups.update', (updates) => {
-      for (const g of updates) if (g.id && g.subject) this.groupNames.set(g.id, g.subject);
+      for (const g of updates) {
+        if (!g.id) continue;
+        if (g.subject) this.groupNames.set(g.id, g.subject);
+        // המטא-דאטה השתנה: מוחקים מהמטמון, ו-Baileys תביא עותק עדכני בשליחה הבאה
+        this.groupMeta.delete(g.id);
+      }
+    });
+    sock.ev.on('group-participants.update', (update) => {
+      this.groupMeta.delete(update.id);
     });
 
     sock.ev.on('connection.update', (update) => {
@@ -271,6 +310,14 @@ export class WhatsAppClient {
     this.sock = undefined;
     this.opts.onFatal?.(reason);
   }
+}
+
+/** המזהה של הצ'אט של החשבון עם עצמו. */
+function selfJid(sock: WASocket): string {
+  const user = sock.user;
+  if (!user) throw new Error('החשבון עדיין לא מזוהה');
+  const pn = user.id.includes('@s.whatsapp.net') ? user.id : user.phoneNumber;
+  return jidNormalizedUser(pn || user.lid || user.id);
 }
 
 /** שם השגיאה בלבד: הודעות שגיאה של הספרייה עלולות לכלול מזהי משתמשים. */

@@ -19,6 +19,11 @@ export interface Config {
   /** הודעה ישנה מזה נחשבת היסטוריה ולא מתומללת. */
   maxMessageAgeSec: number;
   queueConcurrency: number;
+  /**
+   * מצב ניסוי: מה שהיה נשלח לוואטסאפ מודפס ונכתב ל-data/dry-run.txt במקום להישלח.
+   * ברירת המחדל היא true, ושליחה אמיתית דורשת DRY_RUN=false מפורש.
+   */
+  dryRun: boolean;
   /** אזור הזמן להצגת שעת ההודעה. */
   timeZone: string;
   logLevel: string;
@@ -49,6 +54,14 @@ function readInt(env: NodeJS.ProcessEnv, name: string, fallback: number, min: nu
     throw new ConfigError(`${name} חייב להיות מספר שלם בין ${min} ל-${max}`);
   }
   return value;
+}
+
+function readBool(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {
+  const raw = (env[name] ?? '').trim().toLowerCase();
+  if (!raw) return fallback;
+  if (raw === 'true' || raw === '1') return true;
+  if (raw === 'false' || raw === '0') return false;
+  throw new ConfigError(`${name} חייב להיות true או false`);
 }
 
 function readTranscriber(env: NodeJS.ProcessEnv): TranscriberConfig {
@@ -110,6 +123,7 @@ export function parseConfig(env: NodeJS.ProcessEnv, cwd: string = process.cwd())
     maxVoiceSec: readInt(env, 'MAX_VOICE_SECONDS', 600, 1, 7200),
     maxMessageAgeSec: readInt(env, 'MAX_MESSAGE_AGE_SECONDS', 60, 5, 3600),
     queueConcurrency: readInt(env, 'QUEUE_CONCURRENCY', 2, 1, 2),
+    dryRun: readBool(env, 'DRY_RUN', true),
     timeZone,
     logLevel: readLogLevel(env, 'LOG_LEVEL', 'info'),
     baileysLogLevel: readLogLevel(env, 'BAILEYS_LOG_LEVEL', 'silent'),

@@ -1,8 +1,9 @@
 import path from 'node:path';
 import { FileAllowlist } from './allowlist.js';
 import { ConfigError, loadConfig, TRANSCRIBE_MAX_ATTEMPTS, TRANSCRIBE_TIMEOUT_MS, type Config } from './config.js';
+import { createDelivery } from './delivery.js';
 import { createBaileysLogger, createLogger } from './logger.js';
-import { createPipeline, formatPrivate, MemoryProcessedStore } from './pipeline.js';
+import { createPipeline, formatTime, MemoryProcessedStore } from './pipeline.js';
 import { TranscriptionQueue } from './queue.js';
 import { StatusFiles } from './statusfiles.js';
 import { createTranscriber } from './transcriber/index.js';
@@ -64,6 +65,9 @@ async function main(): Promise<void> {
     retryDelayMs: 2_000,
   });
 
+  if (!config.dryRun) files.clearDryRun();
+  logger.info({ dryRun: config.dryRun }, config.dryRun ? 'מצב ניסוי: שום דבר לא נשלח לוואטסאפ' : 'שליחה לוואטסאפ פעילה');
+
   const counters = { transcribed: 0, failed: 0 };
   let connectedLine = '';
   const refreshStatus = () => {
@@ -72,11 +76,26 @@ async function main(): Promise<void> {
       `${connectedLine}\n` +
         `קבוצות מאושרות לתמלול: ${allowlist.size} (data/allowed-groups.txt)\n` +
         `מאז ההפעלה: ${counters.transcribed} תמלולים, ${counters.failed} כישלונות.\n` +
-        'מצב ניסוי: התמלולים נכתבים ל-data/dry-run.txt ולא נשלחים לוואטסאפ.',
+        (config.dryRun
+          ? 'מצב ניסוי (DRY_RUN): מה שהיה נשלח נכתב ל-data/dry-run.txt ולא נשלח לוואטסאפ.'
+          : 'שליחה פעילה: התמלולים נשלחים לוואטסאפ לפי היעד של כל קבוצה.'),
     );
   };
 
   let idle: NodeJS.Timeout | undefined;
+
+  const delivery = createDelivery({
+    logger,
+    dryRun: config.dryRun,
+    timeZone: config.timeZone,
+    modeOf: (jid) => allowlist.modeOf(jid),
+    sendToSelf: (text) => whatsapp.sendToSelf(text),
+    replyInGroup: (original, text) => whatsapp.replyInGroup(original, text),
+    onDryRun: (description) => {
+      process.stdout.write(`\n${description}\n\n`);
+      files.dryRun(description);
+    },
+  });
 
   const whatsapp: WhatsAppClient = new WhatsAppClient({
     authDir: config.authDir,
@@ -100,15 +119,17 @@ async function main(): Promise<void> {
       processed: new MemoryProcessedStore(),
       downloadAudio: (msg) => whatsapp.downloadAudio(msg),
       groupName: (jid) => whatsapp.groupName(jid),
-      // שלב 2: שום דבר לא נשלח לוואטסאפ. התמלול מודפס למסוף ונכתב לקובץ הניסוי.
-      onTranscript: (result) => {
-        const text = formatPrivate(result, config.timeZone);
-        process.stdout.write(`\n${text}\n\n`);
-        files.dryRun(text);
-      },
+      onTranscript: (result) => delivery.deliverTranscript(result),
       onOutcome: (outcome) => {
         if (outcome.status === 'transcribed') counters.transcribed++;
-        if (outcome.status === 'failed') counters.failed++;
+        if (outcome.status === 'failed' || outcome.status === 'send_failed') counters.failed++;
+        if (outcome.status === 'failed') {
+          // אחרי שכל הניסיונות נכשלו: שורת שגיאה לבעל החשבון, בצ'אט עם עצמו
+          const time = formatTime(outcome.facts.timestampSec, config.timeZone);
+          delivery
+            .notifyOwner(`⚠️ תמלול נכשל: [${outcome.groupName}] ${outcome.senderName}, ${time}`)
+            .catch(() => logger.error({ messageId: outcome.facts.messageId }, 'שליחת הודעת השגיאה נכשלה'));
+        }
         refreshStatus();
       },
     }),
