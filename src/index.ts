@@ -1,6 +1,11 @@
-import { ConfigError, loadConfig } from './config.js';
+import path from 'node:path';
+import { FileAllowlist } from './allowlist.js';
+import { ConfigError, loadConfig, TRANSCRIBE_MAX_ATTEMPTS, TRANSCRIBE_TIMEOUT_MS, type Config } from './config.js';
 import { createBaileysLogger, createLogger } from './logger.js';
+import { createPipeline, formatPrivate, MemoryProcessedStore } from './pipeline.js';
+import { TranscriptionQueue } from './queue.js';
 import { StatusFiles } from './statusfiles.js';
+import { createTranscriber } from './transcriber/index.js';
 import { WhatsAppClient, type FatalReason } from './whatsapp.js';
 
 const FATAL_TEXT: Record<FatalReason, string> = {
@@ -13,55 +18,120 @@ const FATAL_TEXT: Record<FatalReason, string> = {
 // כל קובץ שהתהליך יוצר (auth/, data/) נגיש למשתמש המריץ בלבד
 process.umask(0o077);
 
-async function main(): Promise<void> {
-  let config;
+/**
+ * נשארים במצב המתנה במקום לצאת: יציאה הייתה גורמת למנהל התהליכים להפעיל מחדש
+ * בלולאה, בלי שמישהו טיפל בבעיה.
+ */
+function idleUntilSignal(): void {
+  const timer = setInterval(() => undefined, 60 * 60 * 1000);
+  const exit = () => {
+    clearInterval(timer);
+    process.exit(0);
+  };
+  process.once('SIGINT', exit);
+  process.once('SIGTERM', exit);
+}
+
+function loadConfigOrIdle(): Config | undefined {
   try {
-    config = loadConfig();
+    return loadConfig();
   } catch (err) {
-    if (err instanceof ConfigError) {
-      console.error('שגיאת הגדרות: ' + err.message);
-      process.exit(2);
-    }
-    throw err;
+    if (!(err instanceof ConfigError)) throw err;
+    console.error('שגיאת הגדרות: ' + err.message);
+    const dataDir = path.resolve(process.cwd(), (process.env.DATA_DIR ?? '').trim() || 'data');
+    new StatusFiles(dataDir).status('שגיאת הגדרות, השירות לא פועל:\n' + err.message + '\nתקן את קובץ .env והפעל מחדש.');
+    idleUntilSignal();
+    return undefined;
   }
+}
+
+async function main(): Promise<void> {
+  const config = loadConfigOrIdle();
+  if (!config) return;
 
   const logger = createLogger(config.logLevel);
   const files = new StatusFiles(config.dataDir);
   files.status('מתחבר לוואטסאפ...');
-  let groupsPrinted = false;
+
+  const allowlist = new FileAllowlist(config.allowlistFile, (count, invalidLines) => {
+    logger.info({ groups: count, invalidLines }, 'רשימת הקבוצות המאושרות נטענה');
+  });
+  const transcriber = createTranscriber(config.transcriber);
+  const queue = new TranscriptionQueue({
+    concurrency: config.queueConcurrency,
+    timeoutMs: TRANSCRIBE_TIMEOUT_MS,
+    maxAttempts: TRANSCRIBE_MAX_ATTEMPTS,
+    retryDelayMs: 2_000,
+  });
+
+  const counters = { transcribed: 0, failed: 0 };
+  let connectedLine = '';
+  const refreshStatus = () => {
+    if (!connectedLine) return;
+    files.status(
+      `${connectedLine}\n` +
+        `קבוצות מאושרות לתמלול: ${allowlist.size} (data/allowed-groups.txt)\n` +
+        `מאז ההפעלה: ${counters.transcribed} תמלולים, ${counters.failed} כישלונות.\n` +
+        'מצב ניסוי: התמלולים נכתבים ל-data/dry-run.txt ולא נשלחים לוואטסאפ.',
+    );
+  };
+
   let idle: NodeJS.Timeout | undefined;
 
-  const whatsapp = new WhatsAppClient({
+  const whatsapp: WhatsAppClient = new WhatsAppClient({
     authDir: config.authDir,
     pairingPhone: config.pairingPhone,
     logger,
     baileysLogger: createBaileysLogger(config.baileysLogLevel),
     onQr: (qr) => files.pairingQr(qr),
     onPairingCode: (code) => files.pairingCode(code),
-    onReconnecting: (statusCode) => files.status(`החיבור נסגר (קוד ${statusCode ?? 'לא ידוע'}), מנסה להתחבר מחדש...`),
+    onReconnecting: (statusCode) => {
+      connectedLine = '';
+      files.status(`החיבור נסגר (קוד ${statusCode ?? 'לא ידוע'}), מנסה להתחבר מחדש...`);
+    },
+    onMessage: createPipeline({
+      logger,
+      queue,
+      transcriber,
+      languageHint: config.languageHint,
+      maxVoiceSec: config.maxVoiceSec,
+      maxMessageAgeSec: config.maxMessageAgeSec,
+      isGroupAllowed: (jid) => allowlist.has(jid),
+      processed: new MemoryProcessedStore(),
+      downloadAudio: (msg) => whatsapp.downloadAudio(msg),
+      groupName: (jid) => whatsapp.groupName(jid),
+      // שלב 2: שום דבר לא נשלח לוואטסאפ. התמלול מודפס למסוף ונכתב לקובץ הניסוי.
+      onTranscript: (result) => {
+        const text = formatPrivate(result, config.timeZone);
+        process.stdout.write(`\n${text}\n\n`);
+        files.dryRun(text);
+      },
+      onOutcome: (outcome) => {
+        if (outcome.status === 'transcribed') counters.transcribed++;
+        if (outcome.status === 'failed') counters.failed++;
+        refreshStatus();
+      },
+    }),
     onOpen: async () => {
       files.clearPairing();
-      files.status('מחובר לוואטסאפ.');
-      if (groupsPrinted) return;
+      connectedLine = 'מחובר לוואטסאפ.';
+      refreshStatus();
       const groups = await whatsapp.listGroups();
-      groupsPrinted = true;
       files.groups(groups);
-      files.status(`מחובר לוואטסאפ. ${groups.length} קבוצות, הרשימה ב-data/groups.txt.`);
-      // פלט למסוף לצורך הגדרה, לא ללוג: שמות ומזהי קבוצות בלבד
-      const lines = groups.map((g, i) => `${String(i + 1).padStart(3)}. ${g.name}\n     ${g.jid}`);
-      process.stdout.write(`\nקבוצות (${groups.length}):\n${lines.join('\n')}\n\n`);
+      connectedLine = `מחובר לוואטסאפ. ${groups.length} קבוצות, הרשימה ב-data/groups.txt.`;
+      refreshStatus();
     },
     onFatal: (reason) => {
+      connectedLine = '';
       files.clearPairing();
       files.status('נעצר: ' + FATAL_TEXT[reason]);
-      // נשארים במצב המתנה במקום לצאת: יציאה הייתה גורמת למנהל התהליכים להפעיל מחדש
-      // בלולאה, כלומר ניסיונות חיבור חוזרים לוואטסאפ בלי שמישהו מטפל בבעיה.
       idle = setInterval(() => undefined, 60 * 60 * 1000);
     },
   });
 
   const shutdown = (signal: string) => {
     logger.info({ signal }, 'כיבוי מסודר');
+    connectedLine = '';
     files.status('השירות כובה.');
     whatsapp.stop();
     clearInterval(idle);

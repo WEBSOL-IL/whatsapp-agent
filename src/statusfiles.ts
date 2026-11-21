@@ -8,7 +8,11 @@ import type { GroupInfo } from './whatsapp.js';
  * אפשר לפתוח אותם במנהל הקבצים במקום לקרוא את הלוג.
  * אין בהם תוכן הודעות ואין מספרי טלפון של אנשים.
  */
+const DRY_RUN_KEEP = 20;
+
 export class StatusFiles {
+  private readonly dryRunEntries: string[] = [];
+
   constructor(private readonly dir: string) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     chmodSync(dir, 0o700);
@@ -48,6 +52,22 @@ export class StatusFiles {
   clearPairing(): void {
     rmSync(this.file('pairing-qr.png'), { force: true });
     rmSync(this.file('pairing-code.txt'), { force: true });
+  }
+
+  /**
+   * מצב ניסוי: מה שהיה נשלח לוואטסאפ נכתב לכאן במקום להישלח.
+   * הקובץ מכיל טקסט של תמלולים, ולכן נשמרות בו רק ההודעות האחרונות,
+   * והוא קיים רק כל עוד השירות במצב ניסוי.
+   */
+  dryRun(entry: string): void {
+    this.dryRunEntries.push(`--- ${new Date().toISOString()} ---\n${entry}\n`);
+    if (this.dryRunEntries.length > DRY_RUN_KEEP) this.dryRunEntries.shift();
+    this.write('dry-run.txt', this.dryRunEntries.join('\n'));
+  }
+
+  clearDryRun(): void {
+    this.dryRunEntries.length = 0;
+    rmSync(this.file('dry-run.txt'), { force: true });
   }
 
   groups(groups: GroupInfo[]): void {

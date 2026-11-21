@@ -3,8 +3,10 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import makeWASocket, {
   Browsers,
   DisconnectReason,
+  downloadMediaMessage,
   makeCacheableSignalKeyStore,
   useMultiFileAuthState,
+  type WAMessage,
   type WASocket,
 } from 'baileys';
 import QRCode from 'qrcode';
@@ -26,6 +28,8 @@ export interface WhatsAppOptions {
   onPairingCode?: (code: string) => void | Promise<void>;
   /** החיבור נסגר ומתבצע ניסיון חוזר. */
   onReconnecting?: (statusCode: number | undefined) => void;
+  /** כל הודעה שמגיעה, עם סוג האירוע ('notify' = זמן אמת). הסינון נעשה אצל המקבל. */
+  onMessage?: (msg: WAMessage, upsertType: string) => void;
   /** נקרא בכל פעם שהחיבור נפתח (גם אחרי התחברות מחדש). */
   onOpen?: () => void | Promise<void>;
   /** נקרא כשהחיבור נסגר סופית ואין טעם לנסות שוב בלי התערבות ידנית. */
@@ -54,6 +58,7 @@ export class WhatsAppClient {
   /** האם בחיבור הנוכחי הוצע צימוד (התקבל QR), להבדיל מכשל רשת לפני כן. */
   private pairingOffered = false;
   private readonly stopSignal = new AbortController();
+  private readonly groupNames = new Map<string, string>();
 
   constructor(private readonly opts: WhatsAppOptions) {}
 
@@ -83,9 +88,28 @@ export class WhatsAppClient {
       throw new Error('אין חיבור פעיל לוואטסאפ');
     }
     const groups = await this.sock.groupFetchAllParticipating();
-    return Object.values(groups)
+    const list = Object.values(groups)
       .map((g) => ({ jid: g.id, name: g.subject || '(ללא שם)' }))
       .sort((a, b) => a.name.localeCompare(b.name, 'he'));
+    for (const g of list) this.groupNames.set(g.jid, g.name);
+    return list;
+  }
+
+  /** שם הקבוצה לתצוגה, מהמטמון. שם יכול להשתנות, ולכן הזיהוי תמיד לפי המזהה. */
+  groupName(jid: string): string {
+    return this.groupNames.get(jid) ?? '(קבוצה לא מוכרת)';
+  }
+
+  /** מוריד את האודיו של הודעה לזיכרון בלבד. שום דבר לא נכתב לדיסק. */
+  async downloadAudio(msg: WAMessage): Promise<Buffer> {
+    const sock = this.sock;
+    if (!sock || !this.connected) throw new Error('אין חיבור פעיל לוואטסאפ');
+    return downloadMediaMessage(
+      msg,
+      'buffer',
+      {},
+      { logger: this.opts.baileysLogger, reuploadRequest: sock.updateMediaMessage },
+    );
   }
 
   private async connect(): Promise<void> {
@@ -122,6 +146,19 @@ export class WhatsAppClient {
     this.pairingOffered = false;
 
     sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('messages.upsert', ({ messages, type }) => {
+      if (sock !== this.sock) return;
+      for (const msg of messages) this.opts.onMessage?.(msg, type);
+    });
+
+    // שמות קבוצות לתצוגה: קבוצות חדשות ושינויי שם
+    sock.ev.on('groups.upsert', (groups) => {
+      for (const g of groups) if (g.id && g.subject) this.groupNames.set(g.id, g.subject);
+    });
+    sock.ev.on('groups.update', (updates) => {
+      for (const g of updates) if (g.id && g.subject) this.groupNames.set(g.id, g.subject);
+    });
 
     sock.ev.on('connection.update', (update) => {
       void (async () => {
@@ -237,7 +274,7 @@ export class WhatsAppClient {
 }
 
 /** שם השגיאה בלבד: הודעות שגיאה של הספרייה עלולות לכלול מזהי משתמשים. */
-function errorName(err: unknown): string {
+export function errorName(err: unknown): string {
   if (err instanceof Error) {
     const status = (err as { output?: { statusCode?: number } }).output?.statusCode;
     return status ? `${err.name}(${status})` : err.name;
