@@ -138,7 +138,10 @@ export class WhatsAppClient {
           await this.opts.onQr?.(qr);
         }
 
-        if (usePairingCode && !pairingRequested && (connection === 'connecting' || qr)) {
+        // מבקשים קוד צימוד רק אחרי שהגיע QR, כלומר אחרי שלחיצת היד עם השרת הושלמה.
+        // בקשה מוקדמת יותר (במצב connecting) רושמת זהות ב-creds לפני לחיצת היד,
+        // ואז Baileys שולחת בקשת התחברות במקום רישום ווואטסאפ עונה 401.
+        if (usePairingCode && !pairingRequested && qr) {
           pairingRequested = true;
           try {
             const code = await sock.requestPairingCode(pairingPhone!);
