@@ -125,6 +125,19 @@ export class WhatsAppClient {
     await sock.sendMessage(groupJid, { text }, { quoted: original, ephemeralExpiration });
   }
 
+  /**
+   * האם ההודעה נכתבה על ידי בעל החשבון, בצ'אט שלו עם עצמו.
+   * רק הודעות כאלה יכולות להיות פקודות ניהול: הודעה בקבוצה או מאדם אחר לעולם לא.
+   */
+  isOwnerSelfChat(msg: WAMessage): boolean {
+    const user = this.sock?.user;
+    const chat = msg.key.remoteJid;
+    if (!user || !chat || msg.key.fromMe !== true) return false;
+    // הצ'אט עם עצמי יכול להופיע לפי מספר הטלפון או לפי מזהה ה-LID של החשבון
+    const mine = [user.id, user.lid, user.phoneNumber].filter((jid): jid is string => Boolean(jid)).map(jidNormalizedUser);
+    return mine.includes(jidNormalizedUser(chat));
+  }
+
   private requireSocket(): WASocket {
     if (!this.sock || !this.connected) throw new Error('אין חיבור פעיל לוואטסאפ');
     return this.sock;

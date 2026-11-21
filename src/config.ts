@@ -12,8 +12,10 @@ export interface Config {
   pairingPhone: string | undefined;
   /** תיקיית הנתונים: קבצי מצב עכשיו, ובהמשך גם קובץ ה-SQLite. */
   dataDir: string;
-  /** קובץ הקבוצות המאושרות (שלבים 2-3). */
+  /** קובץ הקבוצות משלבים 2-3. מיובא פעם אחת למסד הנתונים. */
   allowlistFile: string;
+  /** קובץ ה-SQLite. */
+  dbFile: string;
   transcriber: TranscriberConfig;
   /** רמז שפה למנוע התמלול (למשל he). undefined = זיהוי אוטומטי. */
   languageHint: string | undefined;
@@ -122,6 +124,7 @@ export function parseConfig(env: NodeJS.ProcessEnv, stateDir: string = resolveSt
     pairingPhone: pairingRaw || undefined,
     dataDir,
     allowlistFile: path.resolve(dataDir, 'allowed-groups.txt'),
+    dbFile: path.resolve(dataDir, 'agent.db'),
     transcriber: readTranscriber(env),
     languageHint: languageHint || undefined,
     maxVoiceSec: readInt(env, 'MAX_VOICE_SECONDS', 600, 1, 7200),

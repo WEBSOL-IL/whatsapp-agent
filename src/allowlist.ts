@@ -1,18 +1,6 @@
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync } from 'node:fs';
 import { isGroupJid } from './filter.js';
-
-const TEMPLATE = `# קבוצות מאושרות לתמלול (שלבים 2-3. בשלב 4 הרשימה תנוהל בפקודות וואטסאפ).
-# שורה לכל קבוצה: המזהה שלה מתוך data/groups.txt, ואחריו (לא חובה) יעד התמלול:
-#   פרטי  = התמלול נשלח רק לצ'אט שלך עם עצמך (ברירת המחדל)
-#   קבוצה = התמלול נשלח כתגובה להודעה הקולית, וכל חברי הקבוצה רואים אותו
-# דוגמאות:
-# 120363012345678901@g.us
-# 120363012345678902@g.us קבוצה
-# שורות שמתחילות ב-# הן הערות. שינוי בקובץ נכנס לתוקף מיד, בלי הפעלה מחדש.
-`;
-
-/** לאן נשלח התמלול של קבוצה. */
-export type DeliveryMode = 'private' | 'group';
+import type { DeliveryMode, Store } from './store.js';
 
 const MODE_WORDS: Record<string, DeliveryMode> = {
   פרטי: 'private',
@@ -37,48 +25,16 @@ export function parseAllowlist(text: string): { groups: Map<string, DeliveryMode
 }
 
 /**
- * רשימת הקבוצות המאושרות מקובץ טקסט. הקובץ נקרא מחדש כשהוא משתנה,
- * כך שאפשר לערוך אותו ממנהל הקבצים בלי להפעיל מחדש את השירות.
+ * ייבוא חד-פעמי של קובץ הקבוצות משלבים 2-3 אל מסד הנתונים.
+ * רץ רק כשהמסד עדיין ריק, ואז משנה את שם הקובץ כדי שיהיה ברור שהוא כבר לא בשימוש.
  */
-export class FileAllowlist {
-  private groups = new Map<string, DeliveryMode>();
-  private loadedMtimeMs = -1;
-
-  constructor(
-    private readonly file: string,
-    private readonly onReload?: (count: number, invalidLines: number) => void,
-  ) {
-    if (!existsSync(file)) writeFileSync(file, TEMPLATE, { mode: 0o600 });
-    this.refresh();
+export function importAllowlistFile(file: string, store: Store, nameOf: (jid: string) => string): number {
+  if (!existsSync(file) || store.hasAnyGroup()) return 0;
+  const { groups } = parseAllowlist(readFileSync(file, 'utf8'));
+  for (const [jid, mode] of groups) {
+    store.setMode(jid, nameOf(jid), mode);
+    store.setEnabled(jid, nameOf(jid), true);
   }
-
-  get size(): number {
-    this.refresh();
-    return this.groups.size;
-  }
-
-  has(groupJid: string): boolean {
-    this.refresh();
-    return this.groups.has(groupJid);
-  }
-
-  /** יעד התמלול של קבוצה. קבוצה שאינה ברשימה מקבלת את ברירת המחדל הבטוחה: פרטי. */
-  modeOf(groupJid: string): DeliveryMode {
-    this.refresh();
-    return this.groups.get(groupJid) ?? 'private';
-  }
-
-  private refresh(): void {
-    let mtimeMs: number;
-    try {
-      mtimeMs = statSync(this.file).mtimeMs;
-    } catch {
-      return; // הקובץ נמחק או לא נגיש: ממשיכים עם הרשימה האחרונה
-    }
-    if (mtimeMs === this.loadedMtimeMs) return;
-    this.loadedMtimeMs = mtimeMs;
-    const { groups, invalidLines } = parseAllowlist(readFileSync(this.file, 'utf8'));
-    this.groups = groups;
-    this.onReload?.(groups.size, invalidLines);
-  }
+  renameSync(file, file + '.imported');
+  return groups.size;
 }

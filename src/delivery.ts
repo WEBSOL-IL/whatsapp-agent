@@ -1,6 +1,6 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { WAMessage } from 'baileys';
-import type { DeliveryMode } from './allowlist.js';
+import type { DeliveryMode } from './store.js';
 import type { Logger } from './logger.js';
 import { formatPrivate, type TranscriptReady } from './pipeline.js';
 

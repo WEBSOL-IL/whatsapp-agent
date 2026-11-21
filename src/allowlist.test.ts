@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { parseAllowlist } from './allowlist.js';
+import { mkdtempSync, existsSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { importAllowlistFile, parseAllowlist } from './allowlist.js';
+import { Store } from './store.js';
 
 describe('parseAllowlist', () => {
   it('קורא מזהי קבוצות ומתעלם מהערות ומשורות ריקות', () => {
@@ -32,5 +36,28 @@ describe('parseAllowlist', () => {
     const { groups, invalidLines } = parseAllowlist('972500000000@s.whatsapp.net\nהמשפחה שלי\n1. קבוצה@g.us\n');
     assert.equal(groups.size, 0);
     assert.equal(invalidLines, 3);
+  });
+});
+
+describe('importAllowlistFile', () => {
+  it('מייבא פעם אחת למסד ריק, שומר על היעד, ומשנה את שם הקובץ', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'allow-'));
+    const file = path.join(dir, 'allowed-groups.txt');
+    try {
+      writeFileSync(file, '1@g.us\n2@g.us קבוצה\n');
+      const store = new Store(':memory:');
+      assert.equal(importAllowlistFile(file, store, (jid) => `שם ${jid}`), 2);
+      assert.deepEqual(store.getGroup('2@g.us'), { jid: '2@g.us', name: 'שם 2@g.us', enabled: true, mode: 'group' });
+      assert.equal(store.modeOf('1@g.us'), 'private');
+      assert.equal(existsSync(file), false);
+      assert.equal(existsSync(file + '.imported'), true);
+
+      // מסד שכבר יש בו קבוצות לא מיובא שוב, גם אם הקובץ חוזר
+      writeFileSync(file, '3@g.us\n');
+      assert.equal(importAllowlistFile(file, store, () => 'x'), 0);
+      assert.equal(store.isEnabled('3@g.us'), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
